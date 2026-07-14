@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep -l \"seed\")",
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(npx eslint *)",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(npm run *)",
+      "Bash(timeout 25 npx prisma dev --help)",
+      "Bash(timeout 40 npx prisma dev -d -P 5433)",
+      "Bash(timeout 5 bash -c \"cat < /dev/tcp/localhost/5433\")",
+      "Bash(npx prisma *)",
+      "Bash(npm ls *)",
+      "Bash(mkdir -p \"prisma/migrations/20260713010000_multi_tenant_stripe\")",
+      "Bash(rm -rf prisma/migrations)",
+      "Bash(mkdir -p prisma/migrations/20260713000000_init)",
+      "Bash(mkdir -p \"prisma/migrations/20260714000000_client_email_send\")",
+      "Bash(rm -f err.log prisma/schema.before.prisma)",
+      "Bash(mkdir -p \"prisma/migrations/20260714010000_roles\")"
+    ]
+  }
+}

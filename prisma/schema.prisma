@@ -1,0 +1,161 @@
+// Groundwork — invoice/estimate generator for landscaping & excavation companies
+// Prisma schema: Postgres persistence for company profile, clients, documents (invoices/estimates), and line items.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum DocumentType {
+  INVOICE
+  ESTIMATE
+}
+
+enum DocumentStatus {
+  DRAFT
+  SENT
+  PAID
+}
+
+/// Owner: full access, including billing/Stripe/Settings and sending or deleting documents.
+/// FieldCrew: can create and edit draft jobs (notes, line items) but can't touch billing,
+/// send/delete documents, or reach Settings.
+enum Role {
+  OWNER
+  FIELD_CREW
+}
+
+/// One row per tenant (a landscaping/excavation company). Owns users, clients, documents,
+/// and its own inventory price list, so companies never see each other's data.
+model Company {
+  id              String   @id @default(cuid())
+  name            String   @default("")
+  logoUrl         String? // data URL or hosted asset URL
+  defaultTaxRate  Float    @default(0)
+  defaultFooter   String   @default("")
+  nextInvoiceSeq  Int      @default(1042)
+  nextEstimateSeq Int      @default(1)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  users          User[]
+  clients        Client[]
+  documents      Document[]
+  inventoryItems InventoryItem[]
+}
+
+/// A login for one company. The first user created for a company (via registration) is
+/// always OWNER; owners can invite additional users under either role from Settings.
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(OWNER)
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+
+  @@index([companyId])
+}
+
+model Client {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  address   String   @default("")
+  email     String?
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents Document[]
+
+  @@index([companyId, name])
+}
+
+/// Invoices and estimates share an identical shape (line items, totals, branding snapshot),
+/// so they're modeled as one table distinguished by `type`, matching the reference UI's
+/// Invoice/Estimate toggle which only changes the title, doc-number prefix, and date labels.
+model Document {
+  id              String         @id @default(cuid())
+  companyId       String
+  company         Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  type            DocumentType   @default(INVOICE)
+  docNumber       String
+  status          DocumentStatus @default(DRAFT)
+  date            DateTime       @default(now())
+  dueDate         DateTime?
+
+  clientId        String?
+  client          Client?        @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  // Free-form fields kept even if the client link is removed/changed, so historical
+  // documents keep showing the name/address they were sent to.
+  clientName      String         @default("")
+  clientAddress   String         @default("")
+  clientEmail     String         @default("")
+
+  notesText       String         @default("") // raw job notes used for Magic Parse
+
+  discountPercent Float          @default(0)
+  discountLabel   String         @default("")
+  taxRate         Float          @default(0)
+
+  footerNote      String         @default("")
+
+  // Stripe payment link, created on demand from the Editor so a client can pay an invoice online.
+  stripePaymentLinkUrl    String?
+  stripeCheckoutSessionId String?
+  paidAt                  DateTime?
+
+  // Set whenever this document is emailed to a client via Resend.
+  sentAt                  DateTime?
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  lineItems       LineItem[]
+
+  @@unique([companyId, docNumber])
+  @@index([companyId, type, status])
+  @@index([companyId, date])
+}
+
+model LineItem {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  label      String
+  qty        Float    @default(1)
+  unit       String   @default("each")
+  rate       Float    @default(0)
+  sortOrder  Int      @default(0)
+
+  createdAt  DateTime @default(now())
+
+  @@index([documentId])
+}
+
+/// Reference price list Magic Parse matches job notes against (seeded per-company with
+/// landscaping/excavation staples; editable later from Settings).
+model InventoryItem {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  key       String
+  label     String
+  unit      String
+  rate      Float
+  matchTerm String   // simple keyword/phrase used by the naive parser to detect this item
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, key])
+}
