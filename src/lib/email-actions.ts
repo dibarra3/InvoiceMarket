@@ -9,6 +9,8 @@ import { renderInvoicePdf } from "./invoice-pdf";
 import { computeTotals } from "./totals";
 import { money, formatDateDisplay } from "./format";
 import { DocumentStatus } from "@/generated/prisma/enums";
+import { ensureGuestAccess } from "./guest-access";
+import { resolveOrigin } from "./origin";
 
 function getResend(): Resend {
   const key = process.env.RESEND_API_KEY;
@@ -45,6 +47,11 @@ export async function sendDocumentEmail(
   const isEstimate = doc.type === "ESTIMATE";
   const docLabel = isEstimate ? "estimate" : "invoice";
 
+  // Clients view and pay through their guest link (or /pay with the access code), which always
+  // creates a fresh, correctly-priced Checkout Session — never a possibly-stale Stripe URL.
+  const access = await ensureGuestAccess(companyId, documentId);
+  const origin = await resolveOrigin();
+
   const resend = getResend();
   let error: { message?: string } | null;
   try {
@@ -55,7 +62,8 @@ export async function sendDocumentEmail(
       text: [
         input.message?.trim(),
         `Please find attached ${docLabel} ${doc.docNumber}${doc.dueDate ? ` (due ${formatDateDisplay(doc.dueDate)})` : ""} for ${money(totals.total)}.`,
-        doc.stripePaymentLinkUrl ? `Pay online: ${doc.stripePaymentLinkUrl}` : null,
+        `View${isEstimate ? "" : " and pay"} online: ${origin}/invoice/${access.token}`,
+        `Or visit ${origin}/pay and enter ${doc.docNumber} with access code ${access.code}.`,
         company.defaultFooter || undefined,
       ]
         .filter(Boolean)

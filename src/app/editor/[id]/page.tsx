@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { auth } from "@/auth";
+import { requireSession } from "@/lib/session";
 import { getDocument, getCompany, listInventory } from "@/lib/actions";
 import { EditorView } from "@/components/EditorView";
 
@@ -12,7 +12,7 @@ export default async function EditorDocumentPage({
 }) {
   const { id } = await params;
   const [session, document, company, inventory] = await Promise.all([
-    auth(),
+    requireSession(),
     getDocument(id),
     getCompany(),
     listInventory(),
@@ -25,7 +25,7 @@ export default async function EditorDocumentPage({
       document={document}
       company={company}
       inventory={inventory}
-      role={session?.user?.role ?? "FIELD_CREW"}
+      role={session.role}
     />
   );
 }

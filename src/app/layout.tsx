@@ -41,11 +41,10 @@ export default async function RootLayout({
     >
       <body className="min-h-full flex flex-col bg-ink text-slate-200 font-sans">
         <div className="flex min-h-screen flex-col">
-          <TopNav authenticated={Boolean(session?.user)} isOwner={session?.user?.role === "OWNER"} />
+          <TopNav role={session?.user?.role ?? null} />
           <div className="flex-1">{children}</div>
           <footer className="mx-auto w-full max-w-6xl px-6 py-10 text-center font-mono text-[11px] text-slate-600">
-            Groundwork persists every invoice, estimate, client, and line item to Postgres — nothing here is
-            mock data.
+            Groundwork is a portfolio demo. Payments run in Stripe Sandbox (test mode) — no real money moves.
           </footer>
         </div>
       </body>

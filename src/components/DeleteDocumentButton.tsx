@@ -18,8 +18,12 @@ export function DeleteDocumentButton({ documentId, docNumber }: { documentId: st
     setError(null);
     startTransition(() => {
       deleteDocument(documentId)
-        .then(() => router.refresh())
-        .catch((err) => setError(err instanceof Error ? err.message : "Couldn't delete."))
+        .then((result) => {
+          if (result.ok) return router.refresh();
+          setError(result.error);
+          alert(result.error);
+        })
+        .catch(() => setError("Couldn't delete."))
         .finally(() => setDeleting(false));
     });
   }
