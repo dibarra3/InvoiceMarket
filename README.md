@@ -217,7 +217,10 @@ fake can simulate Stripe outages to test the failure paths.
 The Vercel build command is `npm run db:deploy && npm run build`. `db:deploy`
 (`scripts/db-deploy.mjs`) runs `prisma migrate deploy` only when `VERCEL_ENV` is `production`,
 or unset when you run it locally. Preview deployments skip migrations, so a branch build can
-never migrate a database it inherits. Preview deployments get no database, app URL, or webhook
+never migrate a database it inherits. `prisma.config.ts` doesn't read `DATABASE_URL`, so
+`npm install`'s `prisma generate` works without a database. The URL comes from the schema's
+`env("DATABASE_URL")`, which only migrations and queries resolve, so those still fail if it's
+missing. Preview deployments get no database, app URL, or webhook
 settings unless you configure Preview-scoped variables.
 
 ## Magic Parse
