@@ -191,6 +191,8 @@ async function nextDocNumber(companyId: string, type: DocumentType): Promise<str
   return `INV-${updated.nextInvoiceSeq - 1}`;
 }
 
+/** Called while rendering /editor, so it must not revalidate: Next.js rejects revalidatePath
+ * during render. /invoices is force-dynamic and always shows new drafts anyway. */
 export async function createDocument(type: DocumentType): Promise<string> {
   const companyId = await requireCompanyId();
   const company = await getCompany();
@@ -209,7 +211,6 @@ export async function createDocument(type: DocumentType): Promise<string> {
       footerNote: company.defaultFooter,
     },
   });
-  revalidatePath("/invoices");
   return doc.id;
 }
 
