@@ -2,8 +2,11 @@
 // Prisma schema: Postgres persistence for company profile, clients, documents (invoices/estimates), and line items.
 
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider      = "prisma-client"
+  output        = "../src/generated/prisma"
+  // "native" for local development; rhel-openssl-3.0.x is Vercel's Node 20+ runtime (Amazon
+  // Linux 2023, OpenSSL 3). next.config.ts traces these engine files into server functions.
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
