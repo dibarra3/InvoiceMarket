@@ -74,57 +74,121 @@ model Client {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  documents Document[]
+  // One-time code an owner shares with the real client so they can link their customer
+  // account to this client record. Only the SHA-256 hash is stored; the code is single-use.
+  portalCodeHash      String?   @unique
+  portalCodeExpiresAt DateTime?
+
+  documents     Document[]
+  customerLinks CustomerClientLink[]
 
   @@index([companyId, name])
+}
+
+/// A customer (bill-to party) login. Deliberately a separate table from `User`: customer
+/// signup never creates a Company and can never carry an Owner/Field Crew role.
+model Customer {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String   @default("")
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  clientLinks CustomerClientLink[]
+}
+
+/// Grants a customer access to a client record's sent/paid documents. Only created by
+/// redeeming an owner-issued portal code — never by matching an (unverified) email address.
+model CustomerClientLink {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([customerId, clientId])
+  @@index([clientId])
 }
 
 /// Invoices and estimates share an identical shape (line items, totals, branding snapshot),
 /// so they're modeled as one table distinguished by `type`, matching the reference UI's
 /// Invoice/Estimate toggle which only changes the title, doc-number prefix, and date labels.
 model Document {
-  id              String         @id @default(cuid())
-  companyId       String
-  company         Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  type            DocumentType   @default(INVOICE)
-  docNumber       String
-  status          DocumentStatus @default(DRAFT)
-  date            DateTime       @default(now())
-  dueDate         DateTime?
+  id        String         @id @default(cuid())
+  companyId String
+  company   Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  type      DocumentType   @default(INVOICE)
+  docNumber String
+  status    DocumentStatus @default(DRAFT)
+  date      DateTime       @default(now())
+  dueDate   DateTime?
 
-  clientId        String?
-  client          Client?        @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
 
   // Free-form fields kept even if the client link is removed/changed, so historical
   // documents keep showing the name/address they were sent to.
-  clientName      String         @default("")
-  clientAddress   String         @default("")
-  clientEmail     String         @default("")
+  clientName    String @default("")
+  clientAddress String @default("")
+  clientEmail   String @default("")
 
-  notesText       String         @default("") // raw job notes used for Magic Parse
+  notesText String @default("") // raw job notes used for Magic Parse
 
-  discountPercent Float          @default(0)
-  discountLabel   String         @default("")
-  taxRate         Float          @default(0)
+  discountPercent Float  @default(0)
+  discountLabel   String @default("")
+  taxRate         Float  @default(0)
 
-  footerNote      String         @default("")
+  footerNote String @default("")
 
   // Stripe payment link, created on demand from the Editor so a client can pay an invoice online.
   stripePaymentLinkUrl    String?
   stripeCheckoutSessionId String?
+  // Amount (USD cents) the current Checkout Session charges; the webhook only marks the
+  // document paid when Stripe reports exactly this amount for exactly this session.
+  stripeCheckoutAmount    Int?
   paidAt                  DateTime?
 
+  // Guest access: an unguessable link token, and a short access code that only works
+  // together with the doc number. Only valid once the document has been sent.
+  guestToken      String? @unique
+  guestAccessCode String? @unique
+
   // Set whenever this document is emailed to a client via Resend.
-  sentAt                  DateTime?
+  sentAt DateTime?
 
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  lineItems       LineItem[]
+  lineItems LineItem[]
+  payments  Payment[]
 
   @@unique([companyId, docNumber])
   @@index([companyId, type, status])
   @@index([companyId, date])
+}
+
+enum PaymentOutcome {
+  APPLIED // verified and used to mark the document PAID
+  NEEDS_REVIEW // money was collected but didn't match the invoice (stale session, already paid, amount/currency mismatch)
+}
+
+/// One row per completed Stripe Checkout Session, written by the signed webhook. The unique
+/// session id makes duplicate webhook deliveries a no-op.
+model Payment {
+  id                      String         @id @default(cuid())
+  documentId              String?
+  document                Document?      @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  stripeCheckoutSessionId String         @unique
+  stripePaymentIntentId   String?
+  amount                  Int // USD cents
+  currency                String
+  outcome                 PaymentOutcome
+  note                    String         @default("")
+  livemode                Boolean        @default(false)
+  createdAt               DateTime       @default(now())
+
+  @@index([documentId])
 }
 
 model LineItem {
@@ -132,13 +196,13 @@ model LineItem {
   documentId String
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
-  label      String
-  qty        Float    @default(1)
-  unit       String   @default("each")
-  rate       Float    @default(0)
-  sortOrder  Int      @default(0)
+  label     String
+  qty       Float  @default(1)
+  unit      String @default("each")
+  rate      Float  @default(0)
+  sortOrder Int    @default(0)
 
-  createdAt  DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([documentId])
 }
@@ -153,7 +217,7 @@ model InventoryItem {
   label     String
   unit      String
   rate      Float
-  matchTerm String   // simple keyword/phrase used by the naive parser to detect this item
+  matchTerm String // simple keyword/phrase used by the naive parser to detect this item
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

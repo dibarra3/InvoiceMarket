@@ -1,4 +1,6 @@
 import { auth } from "@/auth";
+import { prisma } from "./prisma";
+import { UserFacingError } from "./errors";
 
 export type SessionInfo = {
   userId: string;
@@ -6,12 +8,21 @@ export type SessionInfo = {
   role: "OWNER" | "FIELD_CREW";
 };
 
-/** Every Server Action and DB-backed page goes through here so a company can never
- * read or write another company's data. */
+export type CustomerSessionInfo = {
+  customerId: string;
+  email: string;
+  name: string;
+};
+
+/** Every business Server Action and DB-backed page goes through here so a company can never
+ * read or write another company's data. Customer sessions are always rejected. */
 export async function requireSession(): Promise<SessionInfo> {
   const session = await auth();
-  if (!session?.user?.companyId) throw new Error("Not authenticated");
-  return { userId: session.user.id, companyId: session.user.companyId, role: session.user.role };
+  const user = session?.user;
+  if (!user?.companyId || (user.role !== "OWNER" && user.role !== "FIELD_CREW")) {
+    throw new UserFacingError("Please sign in again.");
+  }
+  return { userId: user.id, companyId: user.companyId, role: user.role };
 }
 
 export async function requireCompanyId(): Promise<string> {
@@ -23,7 +34,19 @@ export async function requireCompanyId(): Promise<string> {
 export async function requireOwner(): Promise<string> {
   const { companyId, role } = await requireSession();
   if (role !== "OWNER") {
-    throw new Error("Only the company owner can do this.");
+    throw new UserFacingError("Only the company owner can do this.");
   }
   return companyId;
+}
+
+/** For customer-portal pages and actions. Re-reads the Customer row so a deleted account's
+ * still-valid JWT stops working immediately. */
+export async function requireCustomer(): Promise<CustomerSessionInfo> {
+  const session = await auth();
+  const user = session?.user;
+  if (!user?.id || user.role !== "CUSTOMER") throw new UserFacingError("Please sign in again.");
+
+  const customer = await prisma.customer.findUnique({ where: { id: user.id } });
+  if (!customer) throw new UserFacingError("Please sign in again.");
+  return { customerId: customer.id, email: customer.email, name: customer.name };
 }

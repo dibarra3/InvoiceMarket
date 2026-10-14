@@ -6,6 +6,8 @@ import { requireCompanyId, requireOwner, requireSession } from "./session";
 import { DocumentStatus, DocumentType } from "@/generated/prisma/enums";
 import type { Prisma } from "@/generated/prisma/client";
 import { computeTotals } from "./totals";
+import { invalidateCheckout } from "./checkout";
+import { UserFacingError, actionError, type ActionResult } from "./errors";
 import type {
   ClientRecord,
   CompanyRecord,
@@ -71,7 +73,10 @@ export async function updateCompany(patch: {
   defaultFooter?: string;
 }): Promise<CompanyRecord> {
   const companyId = await requireOwner();
-  const company = await prisma.company.update({ where: { id: companyId }, data: patch });
+  const company = await prisma.company.update({
+    where: { id: companyId },
+    data: pickFields(patch, ["name", "logoUrl", "defaultTaxRate", "defaultFooter"]),
+  });
   revalidatePath("/settings");
   revalidatePath("/editor");
   return {
@@ -248,17 +253,50 @@ async function assertOwnsDraftDocument(companyId: string, documentId: string) {
   return doc;
 }
 
-export async function updateDocument(id: string, patch: DocumentPatch): Promise<void> {
+const DOCUMENT_PATCH_FIELDS = [
+  "type",
+  "status",
+  "date",
+  "dueDate",
+  "clientName",
+  "clientAddress",
+  "clientEmail",
+  "notesText",
+  "discountPercent",
+  "discountLabel",
+  "taxRate",
+  "footerNote",
+  "docNumber",
+] as const satisfies readonly (keyof DocumentPatch)[];
+
+/** Server Actions accept arbitrary client payloads regardless of their TypeScript types, so
+ * copy only known-editable keys — never e.g. `companyId`, `paidAt`, or Stripe/guest fields. */
+function pickFields<T extends object, K extends keyof T>(input: T, keys: readonly K[]): Pick<T, K> {
+  const out = {} as Pick<T, K>;
+  for (const key of keys) {
+    if (input && Object.prototype.hasOwnProperty.call(input, key) && input[key] !== undefined) out[key] = input[key];
+  }
+  return out;
+}
+
+export async function updateDocument(id: string, rawPatch: DocumentPatch): Promise<void> {
   const { companyId, role } = await requireSession();
   const current = await assertOwnsDocument(companyId, id);
+  const patch = pickFields(rawPatch, DOCUMENT_PATCH_FIELDS);
 
   const locked = current.status !== DocumentStatus.DRAFT;
   if (locked && LOCKED_ON_SENT_FIELDS.some((field) => patch[field] !== undefined)) {
-    throw new Error(LOCKED_MESSAGE);
+    throw new UserFacingError(LOCKED_MESSAGE);
   }
-  if (patch.status !== undefined && patch.status !== DocumentStatus.DRAFT && role !== "OWNER") {
-    throw new Error("Only the company owner can mark a document as sent or paid.");
+  const statusChanged = patch.status !== undefined && patch.status !== current.status;
+  if (statusChanged && role !== "OWNER") {
+    throw new UserFacingError("Only the company owner can change a document's status.");
   }
+
+  // Reopening a document for edits, or settling it outside Stripe, first kills its payment
+  // link so the old (possibly wrong) amount can't be paid. If Stripe can't confirm that, this
+  // throws and the status change below never happens.
+  if (statusChanged && patch.status !== DocumentStatus.SENT) await invalidateCheckout(id);
 
   const data: Prisma.DocumentUpdateInput = { ...patch };
   if (patch.date !== undefined) data.date = new Date(patch.date);
@@ -278,6 +316,17 @@ export async function updateDocument(id: string, patch: DocumentPatch): Promise<
   revalidatePath("/invoices");
   revalidatePath("/clients");
   revalidatePath(`/editor/${id}`);
+}
+
+/** Status changes from the Editor, returned as a result so a refusal (e.g. Stripe couldn't
+ * confirm the payment link was cancelled) reaches the UI even in production builds. */
+export async function changeDocumentStatus(id: string, status: DocumentStatus): Promise<ActionResult> {
+  try {
+    await updateDocument(id, { status });
+    return { ok: true };
+  } catch (err) {
+    return actionError(err, "Couldn't change the status.");
+  }
 }
 
 export async function addLineItem(documentId: string): Promise<string> {
@@ -304,7 +353,7 @@ export async function updateLineItem(
   if (!item) throw new Error("Line item not found");
   if (item.document.status !== DocumentStatus.DRAFT) throw new Error(LOCKED_MESSAGE);
 
-  await prisma.lineItem.update({ where: { id }, data: patch });
+  await prisma.lineItem.update({ where: { id }, data: pickFields(patch, ["label", "qty", "unit", "rate"]) });
   revalidatePath(`/editor/${item.documentId}`);
   revalidatePath("/clients");
   revalidatePath("/invoices");
@@ -372,15 +421,22 @@ export async function duplicateDocument(id: string): Promise<string> {
   return copy.id;
 }
 
-/** Owner-only: permanently removes a document and its line items. */
-export async function deleteDocument(id: string): Promise<void> {
-  const companyId = await requireOwner();
-  const doc = await prisma.document.findFirst({ where: { id, companyId } });
-  if (!doc) throw new Error("Document not found");
+/** Owner-only: permanently removes a document and its line items — but only after its
+ * payment link is confirmed cancelled, so a deleted invoice can never be paid. */
+export async function deleteDocument(id: string): Promise<ActionResult> {
+  try {
+    const companyId = await requireOwner();
+    const doc = await prisma.document.findFirst({ where: { id, companyId } });
+    if (!doc) throw new UserFacingError("Document not found.");
 
-  await prisma.document.delete({ where: { id } });
-  revalidatePath("/invoices");
-  revalidatePath("/clients");
+    await invalidateCheckout(id);
+    await prisma.document.delete({ where: { id } });
+    revalidatePath("/invoices");
+    revalidatePath("/clients");
+    return { ok: true };
+  } catch (err) {
+    return actionError(err, "Couldn't delete this document.");
+  }
 }
 
 /** Applies a Magic Parse result: updates client/discount fields and replaces all line items

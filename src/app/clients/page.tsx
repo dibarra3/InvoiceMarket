@@ -1,10 +1,15 @@
 import { listClients } from "@/lib/actions";
 import { initials, money } from "@/lib/format";
+import { requireSession } from "@/lib/session";
+import { listPortalAccessForCompany } from "@/lib/customer-portal";
+import { ClientPortalAccess } from "@/components/ClientPortalAccess";
 
 export const dynamic = "force-dynamic";
 
 export default async function ClientsPage() {
-  const clients = await listClients();
+  const [{ companyId, role }, clients] = await Promise.all([requireSession(), listClients()]);
+  const isOwner = role === "OWNER";
+  const portalAccess = isOwner ? await listPortalAccessForCompany(companyId) : {};
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-6">
@@ -34,6 +39,7 @@ export default async function ClientsPage() {
                 </span>
                 <span className="font-mono text-emerald-400">{money(c.lifetime)}</span>
               </div>
+              {isOwner && <ClientPortalAccess clientId={c.id} access={portalAccess[c.id]} />}
             </div>
           ))}
         </div>

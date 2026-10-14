@@ -89,8 +89,9 @@ matches job notes against all live in Postgres. There is no mock/in-memory state
 - `/register` creates a new `Company` + its first `User` (email/password, hashed with
   bcrypt) and seeds a starter price list for that company.
 - `/login` authenticates via Auth.js's Credentials provider; sessions are JWT-based.
-- `src/proxy.ts` redirects unauthenticated requests to `/login` (JSON 401 for `/api/*`
-  routes) for everything except `/login`, `/register`, `/api/auth/*`, and the Stripe webhook.
+- `src/proxy.ts` sends unauthenticated business requests to `/login` (JSON 401 for `/api/*`)
+  and customer-area requests to `/customer/login`. The homepage, `/pay`, guest invoice links,
+  `/api/auth/*`, and the Stripe webhook are public.
 - Every Server Action in `src/lib/actions.ts` calls `requireCompanyId()`
   (`src/lib/session.ts`) and scopes all Prisma queries to that `companyId` — Clients,
   Documents, and the price list all live under `Company` in the schema.
@@ -122,16 +123,105 @@ matches job notes against all live in Postgres. There is no mock/in-memory state
 - `deleteDocument` permanently removes a document (Owner-only); available from the Invoices
   list and the Editor.
 
-## Payments
+## Entry points
 
-- The Editor's "Get Paid Online" card (invoices only, Owner-only) calls the
-  `createPaymentLink` Server Action (`src/lib/payment-actions.ts`), which creates a Stripe
-  Checkout Session for the invoice's current total and saves the session id/URL on the
-  `Document`.
-- `src/app/api/stripe/webhook/route.ts` verifies the Stripe signature and, on
-  `checkout.session.completed`, marks the matching document `PAID`.
-- Stripe session creation is wrapped so a failure (bad API key, network error, Stripe outage)
-  surfaces as a specific message in the Editor rather than an unhandled exception.
+One site, three audiences:
+
+| Who | Entry | Lands on |
+| --- | --- | --- |
+| Anyone with an invoice | `/` → **Pay an invoice** (`/pay`) | `/invoice/[token]` |
+| Customers | `/customer/login`, `/customer/register` | `/customer/invoices` ("My invoices") |
+| Owners & field crew | **Business sign in** (`/login`), `/register` | existing business app |
+
+`src/proxy.ts` routes each area to the right account type, but it's only a UX layer: every
+page, Server Action, route handler, and PDF download re-checks authorization on the server
+(`requireSession`/`requireOwner`/`requireCustomer` in `src/lib/session.ts`).
+
+## Customer accounts
+
+- Customers live in their own `Customer` table and sign in through a separate Auth.js
+  provider (`customer-credentials`). Signup never creates a `Company` or business `User`, and
+  business guards reject every customer session.
+- A customer sees an invoice only when it's **sent or paid** and belongs to a client record
+  they're linked to (`customerDocumentWhere` in `src/lib/customer-portal.ts`). Email addresses
+  are never used for matching.
+- Linking: on **Clients**, an Owner clicks **Create portal code** for a client. The code is
+  single-use, expires in 7 days, and is stored only as a SHA-256 hash. The Owner gives it to the
+  real client out of band, and the client enters it under **My invoices → Linked accounts**.
+  Owners can remove linked customers from the same card. Invoices are assigned to a client via
+  the Editor's client name, and become visible once sent.
+- "My invoices" shows the customer's invoices across every linked contractor, plus their
+  payment history.
+
+## Guest access
+
+- Each document can have an unguessable 256-bit link token (`/invoice/[token]`) and a 12-character
+  access code. Both are generated on first use from the Editor's **Client Access** card
+  (Owner-only), which has copy buttons and a **Reset link & code** button.
+- `/pay` requires the invoice number **and** the access code. The code (globally unique) picks
+  the document and the number must match it, so neither works alone, and two companies that
+  share an invoice number never collide. Every failure returns the same generic error.
+- Guest pages never show drafts or internal job notes, and they send `Referrer-Policy:
+  no-referrer` and `noindex`. Invoice emails include the guest link and access code.
+
+## Payments (Stripe Sandbox only)
+
+- `getStripe()` refuses any key that isn't `sk_test_`/`rk_test_`, the webhook ignores
+  live-mode events, and every payment surface is labeled **Test mode**.
+- `getOrCreateCheckoutSession` (`src/lib/checkout.ts`) is the single path to Checkout for
+  owners, customers, and guests:
+  - It computes the amount on the server from the stored line items, in USD cents.
+  - It enforces Stripe's $0.50 minimum and refuses drafts, estimates, and paid invoices.
+  - It reuses the open session when the amount and return page still match. Otherwise it
+    expires that session before creating a new one, using a compare-and-set so the invoice
+    never has two live sessions.
+  - Payers return to `/invoice/[token]/payment/{success,canceled}` or
+    `/customer/invoices/[id]/payment/{success,canceled}`, never `/editor`.
+- An Owner's **Create Payment Link** marks a draft as sent, which locks its totals.
+- Moving an invoice back to draft, marking it paid by hand, resetting its guest link, or
+  deleting it first expires the Checkout Session. If Stripe can't confirm the session is
+  expired, the action is refused: nothing changes, the session reference is kept, and the
+  Owner sees a retry message. A session that has already completed also blocks the change,
+  until its webhook records the payment.
+- Only Stripe's explicit `resource_missing` answer, or a session status of `expired`, counts as
+  proof that a session is gone. A network, API, or auth error never does: Checkout refuses to
+  create a replacement and asks the payer to retry.
+- The success page only displays status and polls for updates. **Only the signed webhook marks
+  an invoice paid.** `src/lib/stripe-webhook.ts` applies a `checkout.session.completed` event
+  only if all of these hold:
+  - The session is complete and paid, and its metadata matches the invoice and company.
+  - It is the invoice's *current* session.
+  - The invoice isn't already paid.
+  - The currency is USD and the amount equals the invoice total.
+- Every completed session is recorded once in `Payment`, keyed by the unique session id, so
+  duplicate or concurrent deliveries are no-ops. A payment that collected money but fails a
+  check is recorded as `NEEDS_REVIEW`, for example a second payment on a paid invoice, which
+  needs a refund.
+
+## Tests
+
+Integration tests (Vitest) cover customer isolation, guest access, Checkout creation and
+reuse, success and cancel returns, and the webhook (duplicate, mismatched, and forged events).
+They run against a **disposable** Postgres database and delete only the rows they create:
+
+```bash
+TEST_DATABASE_URL="postgresql://…/groundwork_test" npm test
+```
+
+Use a local Postgres or a Neon *branch*, never the production database (the setup refuses
+the same URL as `.env`'s `DATABASE_URL`). Stripe is faked, so no network calls are made. The
+fake can simulate Stripe outages to test the failure paths.
+
+## Deployment
+
+The Vercel build command is `npm run db:deploy && npm run build`. `db:deploy`
+(`scripts/db-deploy.mjs`) runs `prisma migrate deploy` only when `VERCEL_ENV` is `production`,
+or unset when you run it locally. Preview deployments skip migrations, so a branch build can
+never migrate a database it inherits. `prisma.config.ts` doesn't read `DATABASE_URL`, so
+`npm install`'s `prisma generate` works without a database. The URL comes from the schema's
+`env("DATABASE_URL")`, which only migrations and queries resolve, so those still fail if it's
+missing. Preview deployments get no database, app URL, or webhook
+settings unless you configure Preview-scoped variables.
 
 ## Magic Parse
 
@@ -197,3 +287,4 @@ matches job notes against all live in Postgres. There is no mock/in-memory state
 | `npm run db:deploy`   | Apply existing migrations (e.g. in CI/production)      |
 | `npm run db:seed`     | Re-run the seed script                                 |
 | `npm run db:studio`   | Open Prisma Studio to browse/edit data                 |
+| `npm test`            | Integration tests (needs `TEST_DATABASE_URL`)           |

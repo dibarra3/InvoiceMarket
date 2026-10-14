@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   addLineItem,
   applyParseResult,
+  changeDocumentStatus,
   deleteDocument,
   duplicateDocument,
   removeLineItem,
@@ -19,6 +20,7 @@ import { computeTotals } from "@/lib/totals";
 import { money, toDateInputValue } from "@/lib/format";
 import { VOICE_SAMPLES } from "@/lib/parse";
 import { InvoicePreview } from "@/components/InvoicePreview";
+import { InvoiceAccessCard } from "@/components/InvoiceAccessCard";
 import type { CompanyRecord, DocumentRecord, InventoryItemRecord } from "@/lib/types";
 
 type EditableLineItem = {
@@ -93,6 +95,7 @@ export function EditorView({
   const [duplicating, setDuplicating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [lockError, setLockError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isEstimate = docType === DocumentType.ESTIMATE;
@@ -133,14 +136,31 @@ export function EditorView({
   async function handleDelete() {
     if (!confirm(`Delete ${docNumber}? This can't be undone.`)) return;
     setDeleting(true);
-    try {
-      await deleteDocument(document.id);
+    const result = await deleteDocument(document.id).catch(() => null);
+    if (result?.ok) {
       router.push("/invoices");
-    } catch (err) {
-      console.error("Failed to delete document", err);
-      alert(err instanceof Error ? err.message : "Couldn't delete this document.");
-      setDeleting(false);
+      return;
     }
+    alert(result?.error ?? "Couldn't delete this document.");
+    setDeleting(false);
+  }
+
+  /** Status changes can be refused server-side (e.g. Stripe couldn't confirm the payment link
+   * was cancelled), so roll the select back and explain instead of assuming success. */
+  async function handleStatusChange(next: DocumentStatus) {
+    const previous = status;
+    setStatus(next);
+    setStatusError(null);
+    setSaveState("saving");
+    const result = await changeDocumentStatus(document.id, next).catch(() => null);
+    setSaveState("saved");
+    if (!result?.ok) {
+      setStatus(previous);
+      setStatusError(result?.error ?? "Couldn't change the status.");
+      return;
+    }
+    // The server expired the Checkout link when the document was reopened or paid manually.
+    if (next !== DocumentStatus.SENT) setPaymentLink(null);
   }
 
   function handleVoiceClick() {
@@ -247,14 +267,19 @@ export function EditorView({
     setCreatingLink(true);
     setPaymentState({ text: "", tone: "muted" });
     try {
-      const url = await createPaymentLink(document.id);
-      setPaymentLink(url);
+      const result = await createPaymentLink(document.id);
+      if (!result.ok) {
+        setPaymentState({ text: result.error, tone: "warn" });
+        return;
+      }
+      setPaymentLink(result.url);
+      // Creating a link sends the invoice, which locks its totals.
+      if (status === DocumentStatus.DRAFT) setStatus(DocumentStatus.SENT);
       setPaymentState({ text: "Payment link ready — copy it or open it below.", tone: "good" });
-      window.open(url, "_blank", "noopener,noreferrer");
+      window.open(result.url, "_blank", "noopener,noreferrer");
     } catch (err) {
       console.error("Failed to create payment link", err);
-      const message = err instanceof Error ? err.message : "Couldn't create a payment link.";
-      setPaymentState({ text: message, tone: "warn" });
+      setPaymentState({ text: "Couldn't create a payment link.", tone: "warn" });
     } finally {
       setCreatingLink(false);
     }
@@ -491,11 +516,7 @@ export function EditorView({
               <span className={labelClass}>Status</span>
               <select
                 value={status}
-                onChange={(e) => {
-                  const next = e.target.value as DocumentStatus;
-                  setStatus(next);
-                  persistDocument({ status: next });
-                }}
+                onChange={(e) => handleStatusChange(e.target.value as DocumentStatus)}
                 disabled={!isOwner}
                 className={`${inputClass} disabled:opacity-60`}
               >
@@ -504,6 +525,7 @@ export function EditorView({
                 <option value={DocumentStatus.PAID}>Paid</option>
               </select>
               {!isOwner && <span className="mt-1 block text-[11px] text-slate-600">Only owners can change status.</span>}
+              {statusError && <span className="mt-1 block text-[11px] text-amber-400">{statusError}</span>}
             </label>
             <label className="block">
               <span className={labelClass}>{dateLabel}</span>
@@ -541,19 +563,28 @@ export function EditorView({
             </div>
             <p className="mb-3 text-xs text-slate-500">
               Generates a Stripe Checkout link for the current total — send it to your client so
-              they can pay by card.
+              they can pay by card. Creating a link marks a draft as sent, locking its totals.
+              <span className="mt-1 block font-semibold text-amber-400/90">
+                Test mode: Stripe Sandbox only — no real money moves.
+              </span>
             </p>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={handleCreatePaymentLink}
-                disabled={creatingLink}
+                disabled={creatingLink || status === DocumentStatus.PAID}
                 className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-bold text-ink disabled:opacity-70"
               >
                 {creatingLink && (
                   <span className="h-4 w-4 animate-spin-fast rounded-full border-2 border-ink/30 border-t-ink" />
                 )}
-                {creatingLink ? "Creating link…" : paymentLink ? "Regenerate Payment Link" : "Create Payment Link"}
+                {status === DocumentStatus.PAID
+                  ? "Invoice Paid"
+                  : creatingLink
+                    ? "Creating link…"
+                    : paymentLink
+                      ? "Get Current Payment Link"
+                      : "Create Payment Link"}
               </button>
             </div>
             {paymentState.text && (
@@ -578,6 +609,9 @@ export function EditorView({
             )}
           </div>
         )}
+
+        {/* Guest link / access code / customer portal visibility (Owner-only) */}
+        {isOwner && <InvoiceAccessCard documentId={document.id} isDraft={status === DocumentStatus.DRAFT} />}
 
         {/* PDF export + email delivery */}
         <div className="rounded-xl border border-white/10 bg-card p-5">

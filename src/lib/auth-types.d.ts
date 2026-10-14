@@ -1,11 +1,15 @@
 import "next-auth";
 
+/** OWNER / FIELD_CREW are business `User` rows (always with a companyId); CUSTOMER is a
+ * `Customer` row, which never has a company. */
+export type AccountRole = "OWNER" | "FIELD_CREW" | "CUSTOMER";
+
 declare module "next-auth" {
   interface Session {
     user: {
       id: string;
-      companyId: string;
-      role: "OWNER" | "FIELD_CREW";
+      companyId: string | null;
+      role: AccountRole;
       email?: string | null;
       name?: string | null;
       image?: string | null;
@@ -13,7 +17,7 @@ declare module "next-auth" {
   }
 
   interface User {
-    companyId: string;
-    role: "OWNER" | "FIELD_CREW";
+    companyId: string | null;
+    role: AccountRole;
   }
 }
